@@ -1,7 +1,18 @@
 #!/bin/zsh
 setopt null_glob extended_glob
 
-B=$'\e[1m' D=$'\e[2m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' N=$'\e[0m'
+VERSION=1.0.0
+
+if [[ -t 1 && -z $NO_COLOR ]]; then
+  FANCY=1
+  B=$'\e[1m' D=$'\e[2m' G=$'\e[38;5;114m' Y=$'\e[38;5;221m' R=$'\e[38;5;203m' C=$'\e[38;5;81m' M=$'\e[38;5;177m' N=$'\e[0m'
+else
+  FANCY= B= D= G= Y= R= C= M= N=
+fi
+GRAD=(51 45 39 33 63 99 135 171 207 213)
+STARS=(✦ ✧ ⋆ · ✶ · ⋆ ✧)
+[[ -n $FANCY ]] && trap 'print -n "\e[?25h"' EXIT
+trap '[[ -n $FANCY ]] && print -n "\e[?25h"; print; exit 130' INT
 
 human() {
   local k=${1:-0}
@@ -12,49 +23,157 @@ human() {
 
 sizek() { (( $# )) || { echo 0; return }; du -sk "$@" 2>/dev/null | awk '{s+=$1} END{print s+0}' }
 
-confirm() { local r; read "r?$1 [o/N] "; [[ $r == [oOyY]* ]] }
+bar() {
+  local val=$1 max=$2 width=${3:-20} col=${4:-$C}
+  (( max > 0 )) || max=1
+  local fill=$(( val * width / max ))
+  (( val > 0 && fill == 0 )) && fill=1
+  (( fill > width )) && fill=$width
+  print -n "${col}${(l:fill::█:)}${N}${D}${(l:width-fill::░:)}${N}"
+}
 
-pause() { local r; read "r?${D}Entrée pour revenir au menu${N}" }
+gauge_col() { (( $1 >= 85 )) && print -n $R || { (( $1 >= 60 )) && print -n $Y || print -n $G } }
 
-title() { print "\n${B}${C}== $1 ==${N}" }
+star_line() {
+  local w=${1:-44} line="" i
+  for (( i = 0; i < w; i++ )); do
+    if (( RANDOM % 9 == 0 )); then
+      line+="\e[38;5;$(( RANDOM % 2 ? 228 : 255 ))m${STARS[RANDOM % ${#STARS} + 1]}${N}"
+    else
+      line+=" "
+    fi
+  done
+  print -n "  $line"
+}
+
+LOGO=(
+  "┌┬┐┌─┐┌─┐   ┌─┐┬  ┌─┐┌─┐┌┐┌┌─┐┬─┐"
+  "│││├─┤│  ───│  │  ├┤ ├─┤│││├┤ ├┬┘"
+  "┴ ┴┴ ┴└─┘   └─┘┴─┘└─┘┴ ┴┘└┘└─┘┴└─"
+)
+
+logo_lines() {
+  local l i w=${#LOGO[1]} out
+  for l in $LOGO; do
+    out="     "
+    for (( i = 1; i <= ${#l}; i++ )); do
+      if [[ -n $FANCY ]]; then out+="\e[38;5;${GRAD[(i - 1) * ${#GRAD} / w + 1]}m${l[i]}"
+      else out+=${l[i]}; fi
+    done
+    print "$out${N}"
+  done
+}
+
+draw_logo() {
+  if [[ -z $FANCY ]]; then logo_lines; return; fi
+  local logo=$(logo_lines) f frames=${1:-1}
+  print -n "\e[?25l"
+  for (( f = 1; f <= frames; f++ )); do
+    (( f > 1 )) && print -n "\e[6A"
+    star_line; print
+    print "$logo"
+    star_line; print
+    print "     ${D}v$VERSION · le ménage de ton Mac, en grandes lignes${N}"
+    (( f < frames )) && sleep 0.07
+  done
+  print -n "\e[?25h"
+}
+
+spin() {
+  local msg=$1; shift
+  if [[ -z $FANCY ]]; then "$@"; return; fi
+  local tmp=$(mktemp -t mac-cleaner)
+  "$@" >$tmp 2>/dev/null &
+  local pid=$! i=0 frames=(✶ ✷ ✸ ✹ ✺ ✹ ✸ ✷)
+  print -n "\e[?25l" >&2
+  while kill -0 $pid 2>/dev/null; do
+    printf "\r  ${Y}%s${N} ${D}%s${N}" $frames[$(( i++ % ${#frames} + 1 ))] "$msg" >&2
+    sleep 0.08
+  done
+  wait $pid
+  print -n "\r\e[2K\e[?25h" >&2
+  cat $tmp; rm -f $tmp
+}
+
+confirm() { local r; read "r?  ${M}?${N} $1 ${D}(o/N)${N} ${M}›${N} "; [[ $r == [oOyY]* ]] }
+
+ask() { local __v; read "__v?  ${M}?${N} $2 ${M}›${N} "; : ${(P)1::=$__v} }
+
+pause() { local r; read -s -k1 -u0 "r?  ${D}[ une touche pour revenir au menu ]${N}"; print }
+
+title() {
+  local t=" ✦ $1 " w=56
+  print "\n  ${M}${B}${t}${N}${D}${(l:w-${#t}::─:)}${N}\n"
+}
+
+ok() { print "  ${G}✔${N} $*" }
+warn() { print "  ${Y}!${N} $*" }
+err() { print "  ${R}✘${N} $*" }
+
+celebrate() {
+  local msg=$1 f
+  if [[ -z $FANCY ]]; then print "  * $msg *"; return; fi
+  local -a cols=(228 221 215 213 177 141 117 228)
+  print -n "\e[?25l"
+  for f in {1..8}; do
+    printf "\r  \e[38;5;%dm★ ✦ ⋆${N}  ${B}%s${N}  \e[38;5;%dm⋆ ✦ ★${N}" $cols[f] "$msg" $cols[9 - f]
+    sleep 0.06
+  done
+  print "\e[?25h"
+}
 
 to_trash() {
   local p
   for p in "$@"; do
     [[ -e $p ]] || continue
     trash "$p" 2>/dev/null || osascript -e "tell application \"Finder\" to delete POSIX file \"$p\"" >/dev/null 2>&1 \
-      || print "${R}Impossible de déplacer : $p${N}"
+      || err "Impossible de déplacer : $p"
   done
 }
 
-disk_free() { df -k /System/Volumes/Data | awk 'NR==2{print $4}' }
+disk_stats() { df -k /System/Volumes/Data | awk 'NR==2{print $2, $4}' }
 
-mem_free() { memory_pressure 2>/dev/null | awk -F': ' '/free percentage/{print $2}' }
+mem_free() { memory_pressure 2>/dev/null | awk -F': ' '/free percentage/{gsub("%","",$2); print $2}' }
 
 overview() {
-  print "${B}mac-cleaner${N}  ${D}disque libre :${N} $(human $(disk_free))  ${D}RAM libre :${N} $(mem_free)"
+  local -a ds=( $(disk_stats) )
+  local dpct=$(( (ds[1] - ds[2]) * 100 / ds[1] )) mfree=$(mem_free)
+  local mpct=$(( 100 - ${mfree:-0} ))
+  printf "\n  ${D}Disque${N}  %s ${B}%3d%%${N} ${D}· %s libres${N}\n" "$(bar $dpct 100 24 $(gauge_col $dpct))" $dpct "$(human $ds[2])"
+  printf "  ${D}RAM   ${N}  %s ${B}%3d%%${N} ${D}· %s%% libre${N}\n" "$(bar $mpct 100 24 $(gauge_col $mpct))" $mpct "$mfree"
 }
 
 do_ram() {
   title "RAM"
-  print "Mémoire libre : ${B}$(mem_free)${N}"
-  print "\n${D}Processus les plus gourmands :${N}"
-  ps -axmo rss=,comm= | head -8 | while read -r rss cmd; do
-    printf "  %10s  %s\n" "$(human $rss)" "${cmd:t}"
+  local before=$(mem_free)
+  print "  Mémoire libre : ${B}${before}%${N}\n"
+  print "  ${D}Processus les plus gourmands${N}"
+  local -a procs=( ${(f)"$(ps -axmo rss=,comm= | head -8)"} )
+  local max=${${procs[1]## #}%% *} p rss cmd
+  for p in $procs; do
+    rss=${${p## #}%% *}; cmd=${${p## #}#* }
+    printf "  %s %9s  %s\n" "$(bar $rss $max 16 $M)" "$(human $rss)" "${cmd:t}"
   done
   print
   confirm "Libérer la mémoire inactive (sudo purge) ?" || return 0
-  sudo purge && print "${G}Fait.${N} Mémoire libre : ${B}$(mem_free)${N}"
+  sudo -p "  ${D}mot de passe admin :${N} " true || return 0
+  spin "Purge de la mémoire…" sudo purge
+  local after=$(mem_free)
+  celebrate "RAM libre : ${before}% → ${after}%"
 }
 
 do_trash() {
   title "Corbeille"
-  local k=$(sizek ~/.Trash/*(DN))
-  print "Taille de la corbeille : ${B}$(human $k)${N}"
-  (( k == 0 )) && print "${D}(0 peut signifier que le Terminal n'a pas l'accès complet au disque)${N}"
+  local k=$(spin "Mesure de la corbeille…" sizek ~/.Trash/*(DN))
+  print "  Taille de la corbeille : ${B}$(human $k)${N}"
+  (( k == 0 )) && print "  ${D}(0 peut aussi vouloir dire que le Terminal n'a pas l'accès complet au disque)${N}"
+  print
   confirm "Vider la corbeille (définitif) ?" || return 0
-  osascript -e 'tell application "Finder" to empty trash' >/dev/null 2>&1 \
-    && print "${G}Corbeille vidée.${N}" || print "${R}Échec : autorise le Terminal à piloter le Finder.${N}"
+  if spin "Vidage…" osascript -e 'tell application "Finder" to empty trash' >/dev/null; then
+    celebrate "Corbeille vidée · $(human $k) récupérés"
+  else
+    err "Échec : autorise le Terminal à piloter le Finder (Réglages › Confidentialité › Automatisation)."
+  fi
 }
 
 LIB_DIRS=(
@@ -64,122 +183,159 @@ LIB_DIRS=(
   /Library/"Application Support" /Library/Caches /Library/Preferences /Library/LaunchAgents /Library/LaunchDaemons
 )
 
+leftovers() {
+  local app=$1 name=$2 bid=$3 d
+  local -a expr
+  [[ -n $bid ]] && expr=( -name "$bid" -o -name "$bid.*" -o -name "*.$bid" -o -name "*.$bid.*" -o )
+  print -r -- "$app"
+  for d in $LIB_DIRS; do
+    [[ -d $d ]] || continue
+    find "$d" -mindepth 1 -maxdepth 1 \( $expr -iname "$name" -o -iname "$name.*" \) 2>/dev/null
+  done
+}
+
 do_uninstall() {
   title "Désinstaller une application"
   local filter
-  read "filter?Nom (ou partie du nom) de l'app, vide = toutes : "
+  ask filter "Nom (ou partie du nom), vide = toutes"
   local -a apps
   apps=( /Applications/*.app ~/Applications/*.app )
   [[ -n $filter ]] && apps=( ${(M)apps:#(#i)*${filter}*} )
-  (( ${#apps} )) || { print "${Y}Aucune app trouvée.${N}"; return }
+  (( ${#apps} )) || { warn "Aucune app trouvée."; return 0 }
+  print
   local i=1 a
-  for a in $apps; do printf "  %3d  %s\n" $i "${a:t:r}"; (( i++ )); done
+  for a in $apps; do printf "  ${M}%3d${N}  %s\n" $i "${a:t:r}"; (( i++ )); done
+  print
   local n
-  read "n?Numéro de l'app (vide = annuler) : "
+  ask n "Numéro de l'app (vide = annuler)"
   [[ $n == <1-> && $n -le ${#apps} ]] || return 0
   local app=$apps[$n] name=${apps[$n]:t:r}
   local bid=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)
-  [[ $bid == com.apple.* ]] && { print "${R}App système Apple, ignorée.${N}"; return }
+  [[ $bid == com.apple.* ]] && { err "App système Apple, ignorée."; return 0 }
 
-  local -a found=( "$app" ) expr
-  [[ -n $bid ]] && expr=( -name "$bid" -o -name "$bid.*" -o -name "*.$bid" -o -name "*.$bid.*" -o )
-  local d
-  for d in $LIB_DIRS; do
-    [[ -d $d ]] || continue
-    found+=( ${(f)"$(find "$d" -mindepth 1 -maxdepth 1 \( $expr -iname "$name" -o -iname "$name.*" \) 2>/dev/null)"} )
+  local -a found=( ${(u)${(f)"$(spin "Recherche des fichiers de $name…" leftovers "$app" "$name" "$bid")"}:#} )
+  local -a sizes
+  local f max=0 total=0 k
+  for f in $found; do k=$(sizek "$f"); sizes+=( $k ); (( total += k, k > max ? (max = k) : 0 )); done
+
+  print "\n  ${B}$name${N} ${D}· $bid${N}\n"
+  for i in {1..${#found}}; do
+    printf "  %s %9s  %s\n" "$(bar $sizes[i] $max 12)" "$(human $sizes[i])" "${found[i]/#$HOME/~}"
   done
-  found=( ${(u)found:#} )
-
-  print "\n${B}$name${N} ${D}($bid)${N} — éléments trouvés :"
-  local f
-  for f in $found; do printf "  %10s  %s\n" "$(human $(sizek "$f"))" "${f/#$HOME/~}"; done
-  print "  ${B}Total : $(human $(sizek $found))${N}"
+  print "\n  ${B}Total : $(human $total)${N}\n"
   confirm "Mettre tout cela à la corbeille ?" || return 0
   [[ -n $bid ]] && osascript -e "quit app id \"$bid\"" >/dev/null 2>&1
   to_trash $found
-  print "${G}$name désinstallée (récupérable depuis la corbeille).${N}"
+  celebrate "$name désinstallée · $(human $total) (récupérable dans la corbeille)"
+}
+
+large_scan() {
+  local min=$1 f
+  find "$HOME" -xdev \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -name "*.app" \) -prune -o -type f -size +${min}M -print 2>/dev/null \
+    | while IFS= read -r f; do print -r -- "$(stat -f '%z' "$f")	$f"; done \
+    | sort -t$'\t' -k1,1nr | head -40
 }
 
 do_large() {
   title "Gros fichiers"
   local min
-  read "min?Taille minimale en Mo [500] : "
+  ask min "Taille minimale en Mo ${D}[500]${N}"
   [[ $min == <1-> ]] || min=500
-  print "${D}Recherche dans $HOME (hors ~/Library)…${N}"
-  local -a files
-  files=( ${(f)"$(find "$HOME" -xdev \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -name "*.app" \) -prune -o -type f -size +${min}M -print 2>/dev/null)"} )
-  local -a rows
-  local f
-  for f in $files; do [[ -f $f ]] && rows+=( "$(stat -f '%z' "$f")	$f" ); done
-  rows=( ${(f)"$(print -l $rows | sort -t$'\t' -k1,1nr | head -40)"} )
-  (( ${#rows} )) || { print "${Y}Aucun fichier de plus de $min Mo.${N}"; return }
+  local -a rows=( ${(f)"$(spin "Exploration de ~ (hors ~/Library)…" large_scan $min)"} )
+  (( ${#rows} )) || { warn "Aucun fichier de plus de $min Mo."; return 0 }
   local -a paths
-  local i=1 r
+  local i=1 r max=${rows[1]%%$'\t'*} sz
   for r in $rows; do
-    paths+=( "${r#*$'\t'}" )
-    printf "  %3d  %10s  %s\n" $i "$(human $(( ${r%%$'\t'*} / 1024 )))" "${${r#*$'\t'}/#$HOME/~}"
+    paths+=( "${r#*$'\t'}" ); sz=${r%%$'\t'*}
+    printf "  ${M}%3d${N} %s %9s  %s\n" $i "$(bar $(( sz / 1024 )) $(( max / 1024 )) 12)" "$(human $(( sz / 1024 )))" "${${r#*$'\t'}/#$HOME/~}"
     (( i++ ))
   done
+  print
   local sel
-  read "sel?Numéros à mettre à la corbeille (ex. 1 3 5), vide = rien : "
+  ask sel "Numéros à mettre à la corbeille (ex. 1 3 5), vide = rien"
   local -a pick
   for i in ${=sel}; do [[ $i == <1-> && $i -le ${#paths} ]] && pick+=( "$paths[$i]" ); done
   (( ${#pick} )) || return 0
-  confirm "Mettre ${#pick} fichier(s) ($(human $(sizek $pick))) à la corbeille ?" || return 0
+  local k=$(sizek $pick)
+  confirm "Mettre ${#pick} fichier(s) ($(human $k)) à la corbeille ?" || return 0
   to_trash $pick
-  print "${G}Fait.${N}"
+  celebrate "$(human $k) envoyés à la corbeille"
 }
+
+CACHE_LABELS=( "Caches des apps" "Journaux (logs)" "Xcode DerivedData" "Caches simulateurs iOS" "Cache npm" "Cache Composer" )
+CACHE_DIRS=( ~/Library/Caches ~/Library/Logs ~/Library/Developer/Xcode/DerivedData ~/Library/Developer/CoreSimulator/Caches ~/.npm/_cacache ~/.composer/cache )
+
+cache_sizes() { local d; for d in $CACHE_DIRS; do sizek $d/*(DN); done }
 
 do_caches() {
   title "Caches et fichiers temporaires"
-  local -a labels dirs
-  labels+=( "Caches des apps" );          dirs+=( ~/Library/Caches )
-  labels+=( "Journaux (logs)" );          dirs+=( ~/Library/Logs )
-  labels+=( "Xcode DerivedData" );        dirs+=( ~/Library/Developer/Xcode/DerivedData )
-  labels+=( "Caches simulateurs iOS" );   dirs+=( ~/Library/Developer/CoreSimulator/Caches )
-  labels+=( "Cache npm" );                dirs+=( ~/.npm/_cacache )
-  labels+=( "Cache Composer" );           dirs+=( ~/.composer/cache )
-  local -a sizes
-  local i k total=0
-  for i in {1..${#labels}}; do
-    k=$(sizek ${dirs[$i]}/*(DN)); sizes+=( $k ); (( total += k ))
-    printf "  %3d  %10s  %s\n" $i "$(human $k)" "$labels[$i]"
+  local -a sizes=( ${(f)"$(spin "Analyse des caches…" cache_sizes)"} )
+  local i total=0 max=0
+  for i in {1..${#CACHE_LABELS}}; do (( total += sizes[i], sizes[i] > max ? (max = sizes[i]) : 0 )); done
+  for i in {1..${#CACHE_LABELS}}; do
+    printf "  ${M}%3d${N} %s %9s  %s\n" $i "$(bar $sizes[i] $max 16)" "$(human $sizes[i])" "$CACHE_LABELS[i]"
   done
-  print "  ${B}Total : $(human $total)${N}"
+  print "\n  ${B}Total : $(human $total)${N}\n"
   local sel
-  read "sel?Numéros à nettoyer (ex. 1 3), « t » = tout, vide = rien : "
-  [[ -z $sel ]] && return
-  [[ $sel == [tT]* ]] && sel=$(seq -s ' ' 1 ${#labels})
+  ask sel "Numéros à nettoyer (ex. 1 3), « t » = tout, vide = rien"
+  [[ -z $sel ]] && return 0
+  [[ $sel == [tT]* ]] && sel=$(seq -s ' ' 1 ${#CACHE_LABELS})
   local freed=0 d
   for i in ${=sel}; do
-    [[ $i == <1-> && $i -le ${#labels} ]] || continue
-    d=$dirs[$i]
+    [[ $i == <1-> && $i -le ${#CACHE_LABELS} ]] || continue
+    d=$CACHE_DIRS[i]
     [[ -d $d && $d == $HOME/?* ]] || continue
     rm -rf "$d"/*(DN) 2>/dev/null
     (( freed += sizes[i] ))
-    print "  ${G}✓${N} $labels[$i]"
+    ok "$CACHE_LABELS[i]"
   done
-  print "${G}Environ $(human $freed) libérés.${N} ${D}(les apps ouvertes recréent certains caches)${N}"
+  print
+  celebrate "Environ $(human $freed) libérés"
+  print "  ${D}(les apps ouvertes recréent une partie de leurs caches)${N}"
 }
 
+menu_item() { printf "  ${D}│${N}  ${M}%s${N}  ${B}%s${N}  %-38s${D}│${N}\n" "$1" "$2" "$3" }
+
 menu() {
+  local first=1
   while true; do
+    [[ -n $FANCY ]] && print -n "\e[H\e[2J"
     print
+    draw_logo $(( first ? 10 : 1 )); first=0
     overview
-    print "  ${B}1${N} Libérer la RAM\n  ${B}2${N} Vider la corbeille\n  ${B}3${N} Désinstaller une app\n  ${B}4${N} Gros fichiers\n  ${B}5${N} Nettoyer les caches\n  ${B}q${N} Quitter"
+    print "\n  ${D}╭──────────────────────────────────────────────╮${N}"
+    menu_item ✦ 1 "Libérer la RAM"
+    menu_item ✧ 2 "Vider la corbeille"
+    menu_item ✦ 3 "Désinstaller une application"
+    menu_item ✧ 4 "Chercher les gros fichiers"
+    menu_item ✦ 5 "Nettoyer les caches"
+    menu_item ⋆ q "Quitter"
+    print "  ${D}╰──────────────────────────────────────────────╯${N}\n"
     local c
-    read "c?> " || exit 0
+    read -k1 -u0 "c?  ${M}›${N} " || exit 0
+    print
     case $c in
       1) do_ram ;;
       2) do_trash ;;
       3) do_uninstall ;;
       4) do_large ;;
       5) do_caches ;;
-      q|Q) exit 0 ;;
+      q|Q) print "  ${Y}✦${N} ${D}À bientôt.${N}\n"; exit 0 ;;
       *) continue ;;
     esac
+    print
     pause
   done
+}
+
+usage() {
+  print "Usage : ${0:t} [commande]\n"
+  print "  ram            libérer la mémoire inactive"
+  print "  corbeille      vider la corbeille"
+  print "  desinstaller   désinstaller une app et ses fichiers"
+  print "  gros           chercher les gros fichiers"
+  print "  caches         nettoyer les caches"
+  print "  (sans argument : menu interactif)"
 }
 
 case $1 in
@@ -189,5 +345,7 @@ case $1 in
   gros|large) do_large ;;
   caches) do_caches ;;
   ""|menu) menu ;;
-  *) print "Usage : ${0:t} [ram|corbeille|desinstaller|gros|caches]"; exit 1 ;;
+  -v|--version) print "mac-cleaner $VERSION" ;;
+  -h|--help) usage ;;
+  *) usage; exit 1 ;;
 esac
