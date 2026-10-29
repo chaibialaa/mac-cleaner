@@ -1,0 +1,193 @@
+#!/bin/zsh
+setopt null_glob extended_glob
+
+B=$'\e[1m' D=$'\e[2m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' N=$'\e[0m'
+
+human() {
+  local k=${1:-0}
+  if (( k >= 1048576 )); then printf "%.1f Go" $(( k / 1048576.0 ))
+  elif (( k >= 1024 )); then printf "%.1f Mo" $(( k / 1024.0 ))
+  else printf "%d Ko" $k; fi
+}
+
+sizek() { (( $# )) || { echo 0; return }; du -sk "$@" 2>/dev/null | awk '{s+=$1} END{print s+0}' }
+
+confirm() { local r; read "r?$1 [o/N] "; [[ $r == [oOyY]* ]] }
+
+pause() { local r; read "r?${D}Entrée pour revenir au menu${N}" }
+
+title() { print "\n${B}${C}== $1 ==${N}" }
+
+to_trash() {
+  local p
+  for p in "$@"; do
+    [[ -e $p ]] || continue
+    trash "$p" 2>/dev/null || osascript -e "tell application \"Finder\" to delete POSIX file \"$p\"" >/dev/null 2>&1 \
+      || print "${R}Impossible de déplacer : $p${N}"
+  done
+}
+
+disk_free() { df -k /System/Volumes/Data | awk 'NR==2{print $4}' }
+
+mem_free() { memory_pressure 2>/dev/null | awk -F': ' '/free percentage/{print $2}' }
+
+overview() {
+  print "${B}mac-cleaner${N}  ${D}disque libre :${N} $(human $(disk_free))  ${D}RAM libre :${N} $(mem_free)"
+}
+
+do_ram() {
+  title "RAM"
+  print "Mémoire libre : ${B}$(mem_free)${N}"
+  print "\n${D}Processus les plus gourmands :${N}"
+  ps -axmo rss=,comm= | head -8 | while read -r rss cmd; do
+    printf "  %10s  %s\n" "$(human $rss)" "${cmd:t}"
+  done
+  print
+  confirm "Libérer la mémoire inactive (sudo purge) ?" || return 0
+  sudo purge && print "${G}Fait.${N} Mémoire libre : ${B}$(mem_free)${N}"
+}
+
+do_trash() {
+  title "Corbeille"
+  local k=$(sizek ~/.Trash/*(DN))
+  print "Taille de la corbeille : ${B}$(human $k)${N}"
+  (( k == 0 )) && print "${D}(0 peut signifier que le Terminal n'a pas l'accès complet au disque)${N}"
+  confirm "Vider la corbeille (définitif) ?" || return 0
+  osascript -e 'tell application "Finder" to empty trash' >/dev/null 2>&1 \
+    && print "${G}Corbeille vidée.${N}" || print "${R}Échec : autorise le Terminal à piloter le Finder.${N}"
+}
+
+LIB_DIRS=(
+  ~/Library/"Application Support" ~/Library/Caches ~/Library/Preferences ~/Library/Containers
+  ~/Library/"Group Containers" ~/Library/Logs ~/Library/"Saved Application State" ~/Library/HTTPStorages
+  ~/Library/WebKit ~/Library/LaunchAgents ~/Library/Cookies ~/Library/"Application Scripts"
+  /Library/"Application Support" /Library/Caches /Library/Preferences /Library/LaunchAgents /Library/LaunchDaemons
+)
+
+do_uninstall() {
+  title "Désinstaller une application"
+  local filter
+  read "filter?Nom (ou partie du nom) de l'app, vide = toutes : "
+  local -a apps
+  apps=( /Applications/*.app ~/Applications/*.app )
+  [[ -n $filter ]] && apps=( ${(M)apps:#(#i)*${filter}*} )
+  (( ${#apps} )) || { print "${Y}Aucune app trouvée.${N}"; return }
+  local i=1 a
+  for a in $apps; do printf "  %3d  %s\n" $i "${a:t:r}"; (( i++ )); done
+  local n
+  read "n?Numéro de l'app (vide = annuler) : "
+  [[ $n == <1-> && $n -le ${#apps} ]] || return 0
+  local app=$apps[$n] name=${apps[$n]:t:r}
+  local bid=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)
+  [[ $bid == com.apple.* ]] && { print "${R}App système Apple, ignorée.${N}"; return }
+
+  local -a found=( "$app" ) expr
+  [[ -n $bid ]] && expr=( -name "$bid" -o -name "$bid.*" -o -name "*.$bid" -o -name "*.$bid.*" -o )
+  local d
+  for d in $LIB_DIRS; do
+    [[ -d $d ]] || continue
+    found+=( ${(f)"$(find "$d" -mindepth 1 -maxdepth 1 \( $expr -iname "$name" -o -iname "$name.*" \) 2>/dev/null)"} )
+  done
+  found=( ${(u)found:#} )
+
+  print "\n${B}$name${N} ${D}($bid)${N} — éléments trouvés :"
+  local f
+  for f in $found; do printf "  %10s  %s\n" "$(human $(sizek "$f"))" "${f/#$HOME/~}"; done
+  print "  ${B}Total : $(human $(sizek $found))${N}"
+  confirm "Mettre tout cela à la corbeille ?" || return 0
+  [[ -n $bid ]] && osascript -e "quit app id \"$bid\"" >/dev/null 2>&1
+  to_trash $found
+  print "${G}$name désinstallée (récupérable depuis la corbeille).${N}"
+}
+
+do_large() {
+  title "Gros fichiers"
+  local min
+  read "min?Taille minimale en Mo [500] : "
+  [[ $min == <1-> ]] || min=500
+  print "${D}Recherche dans $HOME (hors ~/Library)…${N}"
+  local -a files
+  files=( ${(f)"$(find "$HOME" -xdev \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -name "*.app" \) -prune -o -type f -size +${min}M -print 2>/dev/null)"} )
+  local -a rows
+  local f
+  for f in $files; do [[ -f $f ]] && rows+=( "$(stat -f '%z' "$f")	$f" ); done
+  rows=( ${(f)"$(print -l $rows | sort -t$'\t' -k1,1nr | head -40)"} )
+  (( ${#rows} )) || { print "${Y}Aucun fichier de plus de $min Mo.${N}"; return }
+  local -a paths
+  local i=1 r
+  for r in $rows; do
+    paths+=( "${r#*$'\t'}" )
+    printf "  %3d  %10s  %s\n" $i "$(human $(( ${r%%$'\t'*} / 1024 )))" "${${r#*$'\t'}/#$HOME/~}"
+    (( i++ ))
+  done
+  local sel
+  read "sel?Numéros à mettre à la corbeille (ex. 1 3 5), vide = rien : "
+  local -a pick
+  for i in ${=sel}; do [[ $i == <1-> && $i -le ${#paths} ]] && pick+=( "$paths[$i]" ); done
+  (( ${#pick} )) || return 0
+  confirm "Mettre ${#pick} fichier(s) ($(human $(sizek $pick))) à la corbeille ?" || return 0
+  to_trash $pick
+  print "${G}Fait.${N}"
+}
+
+do_caches() {
+  title "Caches et fichiers temporaires"
+  local -a labels dirs
+  labels+=( "Caches des apps" );          dirs+=( ~/Library/Caches )
+  labels+=( "Journaux (logs)" );          dirs+=( ~/Library/Logs )
+  labels+=( "Xcode DerivedData" );        dirs+=( ~/Library/Developer/Xcode/DerivedData )
+  labels+=( "Caches simulateurs iOS" );   dirs+=( ~/Library/Developer/CoreSimulator/Caches )
+  labels+=( "Cache npm" );                dirs+=( ~/.npm/_cacache )
+  labels+=( "Cache Composer" );           dirs+=( ~/.composer/cache )
+  local -a sizes
+  local i k total=0
+  for i in {1..${#labels}}; do
+    k=$(sizek ${dirs[$i]}/*(DN)); sizes+=( $k ); (( total += k ))
+    printf "  %3d  %10s  %s\n" $i "$(human $k)" "$labels[$i]"
+  done
+  print "  ${B}Total : $(human $total)${N}"
+  local sel
+  read "sel?Numéros à nettoyer (ex. 1 3), « t » = tout, vide = rien : "
+  [[ -z $sel ]] && return
+  [[ $sel == [tT]* ]] && sel=$(seq -s ' ' 1 ${#labels})
+  local freed=0 d
+  for i in ${=sel}; do
+    [[ $i == <1-> && $i -le ${#labels} ]] || continue
+    d=$dirs[$i]
+    [[ -d $d && $d == $HOME/?* ]] || continue
+    rm -rf "$d"/*(DN) 2>/dev/null
+    (( freed += sizes[i] ))
+    print "  ${G}✓${N} $labels[$i]"
+  done
+  print "${G}Environ $(human $freed) libérés.${N} ${D}(les apps ouvertes recréent certains caches)${N}"
+}
+
+menu() {
+  while true; do
+    print
+    overview
+    print "  ${B}1${N} Libérer la RAM\n  ${B}2${N} Vider la corbeille\n  ${B}3${N} Désinstaller une app\n  ${B}4${N} Gros fichiers\n  ${B}5${N} Nettoyer les caches\n  ${B}q${N} Quitter"
+    local c
+    read "c?> " || exit 0
+    case $c in
+      1) do_ram ;;
+      2) do_trash ;;
+      3) do_uninstall ;;
+      4) do_large ;;
+      5) do_caches ;;
+      q|Q) exit 0 ;;
+      *) continue ;;
+    esac
+    pause
+  done
+}
+
+case $1 in
+  ram) do_ram ;;
+  corbeille|trash) do_trash ;;
+  desinstaller|uninstall) do_uninstall ;;
+  gros|large) do_large ;;
+  caches) do_caches ;;
+  ""|menu) menu ;;
+  *) print "Usage : ${0:t} [ram|corbeille|desinstaller|gros|caches]"; exit 1 ;;
+esac
