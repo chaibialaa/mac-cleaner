@@ -1,7 +1,7 @@
 #!/bin/zsh
 setopt null_glob extended_glob
 
-VERSION=1.0.0
+VERSION=1.0.1
 SCRIPT=${0:t}
 
 if [[ -t 1 && -z $NO_COLOR ]]; then
@@ -313,10 +313,10 @@ do_large() {
   [[ $min == <1-> ]] || min=500
   local -a rows=( ${(f)"$(spin "$T[lg_spin]" large_scan $min)"} )
   (( ${#rows} )) || { warn "$(t lg_none $min)"; return 0 }
-  local -a paths
+  local -a paths psz
   local i=1 r max=${rows[1]%%$'\t'*} sz
   for r in $rows; do
-    paths+=( "${r#*$'\t'}" ); sz=${r%%$'\t'*}
+    paths+=( "${r#*$'\t'}" ); sz=${r%%$'\t'*}; psz+=( $(( sz / 1024 )) )
     printf "  ${M}%3d${N} %s %9s  %s\n" $i "$(bar $(( sz / 1024 )) $(( max / 1024 )) 12)" "$(human $(( sz / 1024 )))" "${${r#*$'\t'}/#$HOME/~}"
     (( i++ ))
   done
@@ -324,9 +324,9 @@ do_large() {
   local sel
   ask sel "$T[lg_pick]"
   local -a pick
-  for i in ${=sel}; do [[ $i == <1-> && $i -le ${#paths} ]] && pick+=( "$paths[$i]" ); done
+  local k=0
+  for i in ${(u)=sel}; do [[ $i == <1-> && $i -le ${#paths} ]] && { pick+=( "$paths[$i]" ); (( k += psz[i] )) }; done
   (( ${#pick} )) || return 0
-  local k=$(sizek $pick)
   confirm "$(t lg_ask ${#pick} "$(human $k)")" || return 0
   to_trash $pick
   celebrate "$(t lg_done "$(human $k)")"
