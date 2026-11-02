@@ -1,8 +1,17 @@
 #!/bin/zsh
 setopt null_glob extended_glob
 
-VERSION=1.0.3
+VERSION=1.1.0
 SCRIPT=${0:t}
+
+DRY_RUN= YES= CMD=
+for a in "$@"; do
+  case $a in
+    -n|--dry-run) DRY_RUN=1 ;;
+    -y|--yes) YES=1 ;;
+    *) [[ -z $CMD ]] && CMD=$a ;;
+  esac
+done
 
 if [[ -t 1 && -z $NO_COLOR ]]; then
   FANCY=1
@@ -15,18 +24,25 @@ STARS=(✦ ✧ ⋆ · ✶ · ⋆ ✧)
 [[ -n $FANCY ]] && trap 'print -n "\e[?25h"' EXIT
 trap '[[ -n $FANCY ]] && print -n "\e[?25h"; print; exit 130' INT
 
+TRASH_DIR=${MAC_CLEANER_TRASH_DIR:-$HOME/.Trash}
+HIST_FILE=${XDG_STATE_HOME:-$HOME/.local/state}/mac-cleaner/history.tsv
+NM_LIST=
+
 LANG_UI=${MAC_CLEANER_LANG:-$(defaults read -g AppleLanguages 2>/dev/null | awk -F'"' 'NF>1{print substr($2,1,2); exit}')}
 [[ $LANG_UI == fr ]] || LANG_UI=en
 
 typeset -A T
 if [[ $LANG_UI == fr ]]; then
   T=(
-    gb Go mb Mo kb Ko yes '[oOyY]*' yn o/N
+    gb Go mb Mo kb Ko yes '[oOyY]*' yn o/N all_key '[tT]*'
     tagline "le ménage de ton Mac, en grandes lignes"
     disk Disque ram RAM disk_free "%s libres" ram_free "%s%% libre"
     m1 "Libérer la RAM" m2 "Vider la corbeille" m3 "Désinstaller une application"
-    m4 "Chercher les gros fichiers" m5 "Nettoyer les caches" mq Quitter bye "À bientôt."
+    m4 "Chercher les gros fichiers" m5 "Nettoyer les caches" m6 "Vieux téléchargements"
+    m7 "Démarrage (apps et services)" m8 "Fichiers en double" m9 "Nettoyage auto" mh Historique
+    mq Quitter bye "À bientôt."
     back "[ une touche pour revenir au menu ]"
+    dry_badge "APERÇU · rien ne sera supprimé" dry_line "[aperçu] %s" dry_done "Aperçu terminé : rien n'a été supprimé."
     ram_free_now "Mémoire libre : %s%%" top_procs "Processus les plus gourmands"
     ram_ask "Libérer la mémoire inactive (sudo purge) ?" sudo_prompt "mot de passe admin :"
     ram_spin "Purge de la mémoire…" ram_done "RAM libre : %s%% → %s%%"
@@ -39,25 +55,51 @@ if [[ $LANG_UI == fr ]]; then
     un_spin "Recherche des fichiers de %s…" total "Total : %s"
     un_ask "Mettre tout cela à la corbeille ?" un_done "%s désinstallée · %s (récupérable dans la corbeille)"
     mv_fail "Impossible de déplacer : %s"
-    lg_title "Gros fichiers" lg_min "Taille minimale en Mo" lg_spin "Exploration de ~ (hors ~/Library)…"
-    lg_none "Aucun fichier de plus de %s Mo." lg_pick "Numéros à mettre à la corbeille (ex. 1 3 5), vide = rien"
+    lg_min "Taille minimale en Mo" lg_spin "Exploration de ~ (hors ~/Library)…"
+    lg_none "Aucun fichier de plus de %s Mo." pick "Numéros à mettre à la corbeille (ex. 1 3 5), « t » = tout, vide = rien"
     lg_ask "Mettre %s fichier(s) (%s) à la corbeille ?" lg_done "%s envoyés à la corbeille"
     ca_title "Caches et fichiers temporaires" ca_spin "Analyse des caches…"
-    ca_pick "Numéros à nettoyer (ex. 1 3), « t » = tout, vide = rien" all_key '[tT]*'
+    ca_pick "Numéros à nettoyer (ex. 1 3), « t » = tout, vide = rien"
     ca_done "Environ %s libérés" ca_note "(les apps ouvertes recréent une partie de leurs caches)"
-    c1 "Caches des apps" c2 "Journaux (logs)" c3 "Xcode DerivedData" c4 "Caches simulateurs iOS" c5 "Cache npm" c6 "Cache Composer"
-    usage "Usage : %s [commande]"
+    c_apps "Caches des apps" c_logs "Journaux (logs)" c_xcode "Xcode DerivedData" c_devsupport "Xcode iOS DeviceSupport"
+    c_sim "Caches simulateurs iOS" c_npm "Cache npm" c_composer "Cache Composer" c_gradle "Caches Gradle"
+    c_brew "Homebrew (anciennes versions, téléchargements)" c_docker "Docker (images inutilisées, conteneurs arrêtés)"
+    c_nodemod "node_modules inactifs depuis 90 j (%s projet(s))"
+    au_desc "Seulement ce qui est sans risque : caches, journaux, caches de dev, Homebrew, corbeille."
+    au_ask "Tout nettoyer ?"
+    dl_days "Plus vieux que combien de jours" dl_spin "Exploration de ~/Downloads…"
+    dl_none "Aucun élément de plus de %s jours dans Téléchargements." dl_age "%s j"
+    st_spin "Lecture des éléments de démarrage…" st_login "ouverture de session" st_agent "agent utilisateur"
+    st_sysagent "agent système" st_daemon "service système" st_none "Rien ne se lance au démarrage en dehors de macOS."
+    st_pick "Numéros à désactiver (vide = rien)" st_ask "Désactiver %s élément(s) ?"
+    st_note "Une app peut réinstaller son service à son prochain lancement ; la désinstaller est plus propre."
+    st_done "%s élément(s) désactivé(s)"
+    du_dir "Dossier à analyser, vide = ton dossier personnel" du_spin "Comparaison des fichiers…"
+    du_none "Aucun doublon trouvé." du_bad "Dossier introuvable : %s" du_group "Groupe %s · %s × %s"
+    du_keep garde du_pick "Groupes à nettoyer (ex. 1 3), « t » = tout, vide = rien"
+    du_ask "Mettre %s copie(s) (%s) à la corbeille ? Le plus ancien fichier de chaque groupe est gardé."
+    du_done "%s de doublons envoyés à la corbeille"
+    hi_empty "Rien encore." hi_total "Libéré au total : %s"
+    usage "Usage : %s [commande] [--dry-run] [--yes]"
     u_ram "libérer la mémoire inactive" u_trash "vider la corbeille" u_un "désinstaller une app et ses fichiers"
-    u_lg "chercher les gros fichiers" u_ca "nettoyer les caches" u_menu "(sans argument : menu interactif)"
+    u_lg "chercher les gros fichiers" u_ca "nettoyer les caches (apps, dev, Homebrew, Docker, node_modules)"
+    u_dl "vieux fichiers de Téléchargements" u_st "apps et services lancés au démarrage" u_du "fichiers en double"
+    u_auto "tout ce qui est sans risque en un passage" u_hist "ce qui a été libéré, et quand"
+    u_menu "(sans commande : menu interactif)"
+    u_dry "--dry-run, -n   aperçu : montre ce qui serait fait, sans rien supprimer"
+    u_yes "--yes, -y       ne demande pas de confirmation"
   )
 else
   T=(
-    gb GB mb MB kb KB yes '[yY]*' yn y/N
+    gb GB mb MB kb KB yes '[yY]*' yn y/N all_key '[aA]*'
     tagline "tidy up your Mac, the essentials"
     disk Disk ram RAM disk_free "%s free" ram_free "%s%% free"
     m1 "Free up RAM" m2 "Empty the Trash" m3 "Uninstall an app"
-    m4 "Find large files" m5 "Clean caches" mq Quit bye "See you soon."
+    m4 "Find large files" m5 "Clean caches" m6 "Old downloads"
+    m7 "Startup (apps and services)" m8 "Duplicate files" m9 "Auto clean" mh History
+    mq Quit bye "See you soon."
     back "[ press any key to return to the menu ]"
+    dry_badge "DRY RUN · nothing will be deleted" dry_line "[dry run] %s" dry_done "Dry run finished: nothing was deleted."
     ram_free_now "Free memory: %s%%" top_procs "Top memory consumers"
     ram_ask "Free inactive memory (sudo purge)?" sudo_prompt "admin password:"
     ram_spin "Purging memory…" ram_done "Free RAM: %s%% → %s%%"
@@ -70,16 +112,39 @@ else
     un_spin "Looking for %s files…" total "Total: %s"
     un_ask "Move all of this to the Trash?" un_done "%s uninstalled · %s (recoverable from the Trash)"
     mv_fail "Could not move: %s"
-    lg_title "Large files" lg_min "Minimum size in MB" lg_spin "Scanning ~ (excluding ~/Library)…"
-    lg_none "No file larger than %s MB." lg_pick "Numbers to move to the Trash (e.g. 1 3 5), empty = none"
+    lg_min "Minimum size in MB" lg_spin "Scanning ~ (excluding ~/Library)…"
+    lg_none "No file larger than %s MB." pick "Numbers to move to the Trash (e.g. 1 3 5), \"a\" = all, empty = none"
     lg_ask "Move %s file(s) (%s) to the Trash?" lg_done "%s moved to the Trash"
     ca_title "Caches and temporary files" ca_spin "Analyzing caches…"
-    ca_pick "Numbers to clean (e.g. 1 3), \"a\" = all, empty = none" all_key '[aA]*'
+    ca_pick "Numbers to clean (e.g. 1 3), \"a\" = all, empty = none"
     ca_done "About %s freed" ca_note "(running apps will rebuild part of their caches)"
-    c1 "App caches" c2 "Logs" c3 "Xcode DerivedData" c4 "iOS Simulator caches" c5 "npm cache" c6 "Composer cache"
-    usage "Usage: %s [command]"
+    c_apps "App caches" c_logs "Logs" c_xcode "Xcode DerivedData" c_devsupport "Xcode iOS DeviceSupport"
+    c_sim "iOS Simulator caches" c_npm "npm cache" c_composer "Composer cache" c_gradle "Gradle caches"
+    c_brew "Homebrew (old versions, downloads)" c_docker "Docker (unused images, stopped containers)"
+    c_nodemod "node_modules idle for 90 days (%s project(s))"
+    au_desc "Only what is safe: caches, logs, dev caches, Homebrew, Trash."
+    au_ask "Clean everything?"
+    dl_days "Older than how many days" dl_spin "Scanning ~/Downloads…"
+    dl_none "Nothing older than %s days in Downloads." dl_age "%s d"
+    st_spin "Reading startup items…" st_login "login item" st_agent "user agent"
+    st_sysagent "system agent" st_daemon "system service" st_none "Nothing launches at startup besides macOS."
+    st_pick "Numbers to disable (empty = none)" st_ask "Disable %s item(s)?"
+    st_note "An app may reinstall its service on next launch; uninstalling it is cleaner."
+    st_done "%s item(s) disabled"
+    du_dir "Folder to scan, empty = your home folder" du_spin "Comparing files…"
+    du_none "No duplicates found." du_bad "Folder not found: %s" du_group "Group %s · %s × %s"
+    du_keep keep du_pick "Groups to clean (e.g. 1 3), \"a\" = all, empty = none"
+    du_ask "Move %s copy(ies) (%s) to the Trash? The oldest file of each group is kept."
+    du_done "%s of duplicates moved to the Trash"
+    hi_empty "Nothing yet." hi_total "Freed in total: %s"
+    usage "Usage: %s [command] [--dry-run] [--yes]"
     u_ram "free inactive memory" u_trash "empty the Trash" u_un "uninstall an app and its files"
-    u_lg "find large files" u_ca "clean caches" u_menu "(no argument: interactive menu)"
+    u_lg "find large files" u_ca "clean caches (apps, dev, Homebrew, Docker, node_modules)"
+    u_dl "old files in Downloads" u_st "apps and services launched at startup" u_du "duplicate files"
+    u_auto "everything safe in one pass" u_hist "what was freed, and when"
+    u_menu "(no command: interactive menu)"
+    u_dry "--dry-run, -n   preview what would be done, delete nothing"
+    u_yes "--yes, -y       do not ask for confirmation"
   )
 fi
 
@@ -93,6 +158,15 @@ human() {
 }
 
 sizek() { (( $# )) || { echo 0; return }; du -sk "$@" 2>/dev/null | awk '{s+=$1} END{print s+0}' }
+
+to_kb() {
+  awk -v s="$1" 'BEGIN {
+    if (!match(s, /[0-9.]+/)) { print 0; exit }
+    n = substr(s, RSTART, RLENGTH); u = toupper(substr(s, RSTART + RLENGTH)); m = 1 / 1024
+    if (u ~ /^ *K/) m = 1; else if (u ~ /^ *M/) m = 1024; else if (u ~ /^ *G/) m = 1048576; else if (u ~ /^ *T/) m = 1073741824
+    printf "%d\n", n * m
+  }'
+}
 
 bar() {
   local val=$1 max=$2 width=${3:-20} col=${4:-$C}
@@ -166,7 +240,10 @@ spin() {
   cat $tmp; rm -f $tmp
 }
 
-confirm() { local r; read "r?  ${M}?${N} $1 ${D}($T[yn])${N} ${M}›${N} "; [[ $r == ${~T[yes]} ]] }
+confirm() {
+  if [[ -n $YES || -n $DRY_RUN ]]; then print "  ${M}?${N} $1 ${M}›${N} ${D}(${${DRY_RUN:+--dry-run}:---yes})${N}"; return 0; fi
+  local r; read "r?  ${M}?${N} $1 ${D}($T[yn])${N} ${M}›${N} "; [[ $r == ${~T[yes]} ]]
+}
 
 ask() { local __v; read "__v?  ${M}?${N} $2 ${M}›${N} "; : ${(P)1::=$__v} }
 
@@ -178,17 +255,32 @@ key() {
 
 pause() { local r; key r "  ${D}$T[back]${N}"; print }
 
+pick_idx() {
+  local sel=$1 n=$2 i
+  (( n > 0 )) || return 0
+  if [[ $sel == ${~T[all_key]} ]]; then seq 1 $n; return; fi
+  for i in ${(u)=sel}; do [[ $i == <1-> && $i -le $n ]] && print $i; done
+}
+
 title() {
   local t=" ✦ $1 " w=56
   print "\n  ${M}${B}${t}${N}${D}${(l:w-${#t}::─:)}${N}\n"
+  [[ -n $DRY_RUN ]] && print "  ${Y}✦ $T[dry_badge]${N}\n"
 }
 
 ok() { print "  ${G}✔${N} $*" }
 warn() { print "  ${Y}!${N} $*" }
 err() { print "  ${R}✘${N} $*" }
+dry() { print "  ${D}$(t dry_line "$*")${N}" }
+
+act_q() {
+  if [[ -n $DRY_RUN ]]; then dry "$*"; return 0; fi
+  "$@" >/dev/null 2>&1
+}
 
 celebrate() {
   local msg=$1 f
+  if [[ -n $DRY_RUN ]]; then ok "$T[dry_done]"; return; fi
   if [[ -z $FANCY ]]; then print "  * $msg *"; return; fi
   local -a cols=(228 221 215 213 177 141 117 228)
   print -n "\e[?25l"
@@ -199,13 +291,32 @@ celebrate() {
   print "\e[?25h"
 }
 
+log_hist() {
+  [[ -n $DRY_RUN ]] && return 0
+  mkdir -p ${HIST_FILE:h} 2>/dev/null
+  print -r -- "$(date '+%F %H:%M')	$1	${2:-0}	$3" >> $HIST_FILE
+}
+
 to_trash() {
-  local p
+  local p dest
   for p in "$@"; do
     [[ -e $p ]] || continue
-    trash "$p" 2>/dev/null || osascript -e "tell application \"Finder\" to delete POSIX file \"$p\"" >/dev/null 2>&1 \
-      || err "$(t mv_fail "$p")"
+    if [[ -n $DRY_RUN ]]; then dry "→ $T[trash_title] : ${p/#$HOME/~}"; continue; fi
+    if [[ -n $MAC_CLEANER_TRASH_DIR ]]; then
+      dest=$MAC_CLEANER_TRASH_DIR/${p:t}
+      [[ -e $dest ]] && dest+=" $RANDOM"
+      mv "$p" "$dest" 2>/dev/null || err "$(t mv_fail "$p")"
+    else
+      trash "$p" 2>/dev/null || osascript -e "tell application \"Finder\" to delete POSIX file \"$p\"" >/dev/null 2>&1 \
+        || sudo mv "$p" "$TRASH_DIR/" 2>/dev/null || err "$(t mv_fail "$p")"
+    fi
   done
+}
+
+empty_trash() {
+  if [[ -n $DRY_RUN ]]; then dry "$T[trash_ask]"; return 0; fi
+  if [[ -n $MAC_CLEANER_TRASH_DIR ]]; then rm -rf "$MAC_CLEANER_TRASH_DIR"/*(DN)
+  else osascript -e 'tell application "Finder" to empty trash' >/dev/null 2>&1; fi
 }
 
 disk_stats() { df -k /System/Volumes/Data | awk 'NR==2{print $2, $4}' }
@@ -233,19 +344,24 @@ do_ram() {
   done
   print
   confirm "$T[ram_ask]" || return 0
+  if [[ -n $DRY_RUN ]]; then dry "sudo purge"; celebrate; return 0; fi
   sudo -p "  ${D}$T[sudo_prompt]${N} " true || return 0
   spin "$T[ram_spin]" sudo purge
-  celebrate "$(t ram_done $before $(mem_free))"
+  local after=$(mem_free)
+  log_hist m1 0 "$before% → $after%"
+  celebrate "$(t ram_done $before $after)"
 }
 
 do_trash() {
   title "$T[trash_title]"
-  local k=$(spin "$T[trash_spin]" sizek ~/.Trash/*(DN))
+  local k=$(spin "$T[trash_spin]" sizek $TRASH_DIR/*(DN))
   print "  $(t trash_size "${B}$(human $k)${N}")"
   (( k == 0 )) && print "  ${D}$T[trash_zero]${N}"
   print
   confirm "$T[trash_ask]" || return 0
-  if spin "$T[trash_emptying]" osascript -e 'tell application "Finder" to empty trash' >/dev/null; then
+  if [[ -n $DRY_RUN ]]; then empty_trash; celebrate; return 0; fi
+  if spin "$T[trash_emptying]" empty_trash; then
+    log_hist m2 $k
     celebrate "$(t trash_done "$(human $k)")"
   else
     err "$T[trash_fail]"
@@ -296,12 +412,13 @@ do_uninstall() {
 
   print "\n  ${B}$name${N} ${D}· $bid${N}\n"
   for i in {1..${#found}}; do
-    printf "  %s %9s  %s\n" "$(bar $sizes[i] $max 12)" "$(human $sizes[i])" "${found[i]/#$HOME/~}"
+    printf "  %s %9s  %s\n" "$(bar ${sizes[i]} $max 12)" "$(human ${sizes[i]})" "${found[i]/#$HOME/~}"
   done
   print "\n  ${B}$(t total "$(human $total)")${N}\n"
   confirm "$T[un_ask]" || return 0
-  [[ -n $bid ]] && osascript -e "quit app id \"$bid\"" >/dev/null 2>&1
+  [[ -n $bid && -z $DRY_RUN ]] && osascript -e "quit app id \"$bid\"" >/dev/null 2>&1
   to_trash $found
+  log_hist m3 $total "$name"
   celebrate "$(t un_done $name "$(human $total)")"
 }
 
@@ -313,11 +430,12 @@ large_scan() {
 }
 
 do_large() {
-  title "$T[lg_title]"
+  title "$T[m4]"
   local min
   ask min "$T[lg_min] ${D}[500]${N}"
   [[ $min == <1-> ]] || min=500
   local -a rows=( ${(f)"$(spin "$T[lg_spin]" large_scan $min)"} )
+  rows=( ${rows:#} )
   (( ${#rows} )) || { warn "$(t lg_none $min)"; return 0 }
   local -a paths psz
   local i=1 r max=${rows[1]%%$'\t'*} sz
@@ -328,65 +446,326 @@ do_large() {
   done
   print
   local sel
-  ask sel "$T[lg_pick]"
+  ask sel "$T[pick]"
   local -a pick
   local k=0
-  for i in ${(u)=sel}; do [[ $i == <1-> && $i -le ${#paths} ]] && { pick+=( "$paths[$i]" ); (( k += psz[i] )) }; done
+  for i in $(pick_idx "$sel" ${#paths}); do pick+=( "${paths[i]}" ); (( k += psz[i] )); done
   (( ${#pick} )) || return 0
   confirm "$(t lg_ask ${#pick} "$(human $k)")" || return 0
   to_trash $pick
+  log_hist m4 $k
   celebrate "$(t lg_done "$(human $k)")"
 }
 
-CACHE_DIRS=( ~/Library/Caches ~/Library/Logs ~/Library/Developer/Xcode/DerivedData ~/Library/Developer/CoreSimulator/Caches ~/.npm/_cacache ~/.composer/cache )
+CACHE_KEYS=(apps logs xcode devsupport sim npm composer gradle brew docker nodemod)
+SAFE_KEYS=(apps logs xcode sim npm composer gradle brew)
+typeset -A CDIR
+CDIR=(
+  apps "$HOME/Library/Caches" logs "$HOME/Library/Logs" xcode "$HOME/Library/Developer/Xcode/DerivedData"
+  devsupport "$HOME/Library/Developer/Xcode/iOS DeviceSupport" sim "$HOME/Library/Developer/CoreSimulator/Caches"
+  npm "$HOME/.npm/_cacache" composer "$HOME/.composer/cache" gradle "$HOME/.gradle/caches"
+)
 
-cache_sizes() { local d; for d in $CACHE_DIRS; do sizek $d/*(DN); done }
+cache_avail() {
+  [[ " $MAC_CLEANER_SKIP " == *" $1 "* ]] && return 1
+  case $1 in
+    brew) (( $+commands[brew] )) ;;
+    docker) (( $+commands[docker] )) && docker info >/dev/null 2>&1 ;;
+    nodemod) return 0 ;;
+    *) [[ -d $CDIR[$1] ]] ;;
+  esac
+}
+
+brew_kb() { to_kb "$(brew cleanup -n -s 2>/dev/null | awk '/free approximately/{print $(NF-3)}')" }
+
+docker_kb() {
+  local l s=0
+  for l in ${(f)"$(docker system df --format '{{.Type}}|{{.Reclaimable}}' 2>/dev/null)"}; do
+    [[ $l == Local\ Volumes* || -z $l ]] && continue
+    (( s += $(to_kb "${${l#*|}%% *}") ))
+  done
+  print $s
+}
+
+nm_scan() {
+  local root nm
+  for root in ${(s.:.)${MAC_CLEANER_PROJECTS:-$HOME}}; do
+    [[ -d $root ]] || continue
+    find "$root" -maxdepth 6 \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -name .git \) -prune -o -type d -name node_modules -prune -print 2>/dev/null
+  done | while IFS= read -r nm; do
+    [[ -z $(find "${nm:h}" -mindepth 1 -maxdepth 2 -not -path '*/node_modules*' -not -path '*/.git*' -mtime -90 -print -quit 2>/dev/null) ]] && print -r -- "$nm"
+  done
+}
+
+nm_paths() { local -a l=( ${(f)"$(<$NM_LIST)"} ); print -rl -- ${l:#} }
+
+cache_kb() {
+  case $1 in
+    brew) brew_kb ;;
+    docker) docker_kb ;;
+    nodemod) nm_scan > $NM_LIST; local -a l=( ${(f)"$(nm_paths)"} ); sizek ${l:#} ;;
+    *) sizek $CDIR[$1]/*(DN) ;;
+  esac
+}
+
+scan_caches() { local k; for k in "$@"; do cache_avail $k && print -r -- "$k	$(cache_kb $k)"; done }
+
+cache_label() {
+  if [[ $1 == nodemod ]]; then local -a l=( ${(f)"$(nm_paths)"} ); t c_nodemod ${#${l:#}}
+  else print -n "$T[c_$1]"; fi
+}
+
+cache_clean() {
+  local k=$1 d
+  case $k in
+    brew) act_q brew cleanup -s ;;
+    docker) act_q docker system prune -af ;;
+    nodemod) for d in ${(f)"$(nm_paths)"}; do [[ $d == */node_modules ]] && act_q rm -rf "$d"; done ;;
+    *)
+      d=$CDIR[$k]
+      [[ -d $d && $d == $HOME/?* ]] || return 0
+      if [[ -n $DRY_RUN ]]; then dry "rm -rf ${d/#$HOME/~}/*"; else rm -rf "$d"/*(DN) 2>/dev/null; fi
+      ;;
+  esac
+}
 
 do_caches() {
   title "$T[ca_title]"
-  local -a sizes=( ${(f)"$(spin "$T[ca_spin]" cache_sizes)"} )
-  local i total=0 max=0
-  for i in {1..${#CACHE_DIRS}}; do (( total += sizes[i], sizes[i] > max ? (max = sizes[i]) : 0 )); done
-  for i in {1..${#CACHE_DIRS}}; do
-    printf "  ${M}%3d${N} %s %9s  %s\n" $i "$(bar $sizes[i] $max 16)" "$(human $sizes[i])" "$T[c$i]"
+  NM_LIST=$(mktemp -t mac-cleaner)
+  local -a rows=( ${(f)"$(spin "$T[ca_spin]" scan_caches $CACHE_KEYS)"} ) keys sizes
+  rows=( ${rows:#} )
+  local r i total=0 max=0
+  for r in $rows; do keys+=( ${r%%$'\t'*} ); sizes+=( ${r#*$'\t'} ); done
+  (( ${#keys} )) || { rm -f $NM_LIST; return 0 }
+  for i in {1..${#keys}}; do (( total += sizes[i], sizes[i] > max ? (max = sizes[i]) : 0 )); done
+  for i in {1..${#keys}}; do
+    printf "  ${M}%3d${N} %s %9s  %s\n" $i "$(bar ${sizes[i]} $max 16)" "$(human ${sizes[i]})" "$(cache_label ${keys[i]})"
   done
   print "\n  ${B}$(t total "$(human $total)")${N}\n"
-  local sel
+  local sel freed=0
   ask sel "$T[ca_pick]"
-  [[ -z $sel ]] && return 0
-  [[ $sel == ${~T[all_key]} ]] && sel=$(seq -s ' ' 1 ${#CACHE_DIRS})
-  local freed=0 d
-  for i in ${=sel}; do
-    [[ $i == <1-> && $i -le ${#CACHE_DIRS} ]] || continue
-    d=$CACHE_DIRS[i]
-    [[ -d $d && $d == $HOME/?* ]] || continue
-    rm -rf "$d"/*(DN) 2>/dev/null
+  for i in $(pick_idx "$sel" ${#keys}); do
+    cache_clean ${keys[i]}
     (( freed += sizes[i] ))
-    ok "$T[c$i]"
+    ok "$(cache_label ${keys[i]})"
+  done
+  rm -f $NM_LIST
+  (( freed )) || return 0
+  print
+  log_hist m5 $freed
+  celebrate "$(t ca_done "$(human $freed)")"
+  [[ -z $DRY_RUN ]] && print "  ${D}$T[ca_note]${N}"
+}
+
+do_auto() {
+  title "$T[m9]"
+  print "  ${D}$T[au_desc]${N}\n"
+  NM_LIST=$(mktemp -t mac-cleaner)
+  local -a rows=( ${(f)"$(spin "$T[ca_spin]" scan_caches $SAFE_KEYS)"} )
+  rows=( ${rows:#} )
+  local tk=$(sizek $TRASH_DIR/*(DN)) r s total=0
+  for r in $rows; do
+    s=${r#*$'\t'}; (( total += s ))
+    printf "  %9s  %s\n" "$(human $s)" "$(cache_label ${r%%$'\t'*})"
+  done
+  printf "  %9s  %s\n" "$(human $tk)" "$T[trash_title]"
+  (( total += tk ))
+  print "\n  ${B}$(t total "$(human $total)")${N}\n"
+  confirm "$T[au_ask]" || { rm -f $NM_LIST; return 0 }
+  for r in $rows; do cache_clean ${r%%$'\t'*}; done
+  empty_trash
+  rm -f $NM_LIST
+  log_hist m9 $total
+  print
+  celebrate "$(t ca_done "$(human $total)")"
+}
+
+dl_scan() {
+  local f
+  find "$HOME/Downloads" -mindepth 1 -maxdepth 1 -not -name '.*' -mtime +$1 2>/dev/null | while IFS= read -r f; do
+    print -r -- "$(sizek "$f")	$(stat -f %m "$f")	$f"
+  done | sort -t$'\t' -k1,1nr | head -40
+}
+
+do_downloads() {
+  title "$T[m6]"
+  local days
+  ask days "$T[dl_days] ${D}[90]${N}"
+  [[ $days == <1-> ]] || days=90
+  local -a rows=( ${(f)"$(spin "$T[dl_spin]" dl_scan $days)"} )
+  rows=( ${rows:#} )
+  (( ${#rows} )) || { warn "$(t dl_none $days)"; return 0 }
+  local -a paths psz
+  local now=$(date +%s) i=1 r sz mt p max=${rows[1]%%$'\t'*}
+  for r in $rows; do
+    sz=${r%%$'\t'*}; mt=${${r#*$'\t'}%%$'\t'*}; p=${r#*$'\t'*$'\t'}
+    paths+=( "$p" ); psz+=( $sz )
+    printf "  ${M}%3d${N} %s %9s  ${D}%6s${N}  %s\n" $i "$(bar $sz $max 12)" "$(human $sz)" "$(t dl_age $(( (now - mt) / 86400 )))" "${p:t}"
+    (( i++ ))
   done
   print
-  celebrate "$(t ca_done "$(human $freed)")"
-  print "  ${D}$T[ca_note]${N}"
+  local sel k=0
+  ask sel "$T[pick]"
+  local -a pick
+  for i in $(pick_idx "$sel" ${#paths}); do pick+=( "${paths[i]}" ); (( k += psz[i] )); done
+  (( ${#pick} )) || return 0
+  confirm "$(t lg_ask ${#pick} "$(human $k)")" || return 0
+  to_trash $pick
+  log_hist m6 $k
+  celebrate "$(t lg_done "$(human $k)")"
+}
+
+st_scan() {
+  local f label kind state names
+  if [[ -z $MAC_CLEANER_TEST ]]; then
+    names=$(osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null)
+    for f in ${(s:, :)names}; do [[ -n $f ]] && print -r -- "login	on	$f	$f"; done
+  fi
+  for f in $HOME/Library/LaunchAgents/*.plist /Library/LaunchAgents/*.plist /Library/LaunchDaemons/*.plist; do
+    label=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$f" 2>/dev/null) || label=${f:t:r}
+    [[ $label == com.apple.* ]] && continue
+    case $f in
+      $HOME/*) kind=agent ;;
+      /Library/LaunchAgents/*) kind=sysagent ;;
+      *) kind=daemon ;;
+    esac
+    if [[ $kind == daemon ]]; then launchctl print system/$label >/dev/null 2>&1 && state=on || state=off
+    else launchctl list "$label" >/dev/null 2>&1 && state=on || state=off; fi
+    print -r -- "$kind	$state	$label	$f"
+  done
+}
+
+st_disable() {
+  local kind=$1 label=$2 f=$3
+  case $kind in
+    login) act_q osascript -e "tell application \"System Events\" to delete login item \"$label\"" ;;
+    agent) act_q launchctl bootout gui/$UID "$f"; to_trash "$f" ;;
+    sysagent) act_q sudo launchctl bootout gui/$UID "$f"; to_trash "$f" ;;
+    daemon) act_q sudo launchctl bootout system "$f"; to_trash "$f" ;;
+  esac
+}
+
+do_startup() {
+  title "$T[m7]"
+  local -a rows=( ${(f)"$(spin "$T[st_spin]" st_scan)"} )
+  rows=( ${rows:#} )
+  (( ${#rows} )) || { ok "$T[st_none]"; return 0 }
+  local -a kinds labels files
+  local i=1 r kind state label f dot
+  for r in $rows; do
+    kind=${r%%$'\t'*}; r=${r#*$'\t'}; state=${r%%$'\t'*}; r=${r#*$'\t'}; label=${r%%$'\t'*}; f=${r#*$'\t'}
+    kinds+=( $kind ); labels+=( "$label" ); files+=( "$f" )
+    [[ $state == on ]] && dot="${G}●${N}" || dot="${D}○${N}"
+    printf "  ${M}%3d${N} %s  %-38s ${D}%s${N}\n" $i "$dot" "$label" "$T[st_$kind]"
+    (( i++ ))
+  done
+  print "\n  ${D}$T[st_note]${N}\n"
+  local sel
+  ask sel "$T[st_pick]"
+  local -a pick
+  for i in $(pick_idx "$sel" ${#labels}); do pick+=( $i ); done
+  (( ${#pick} )) || return 0
+  confirm "$(t st_ask ${#pick})" || return 0
+  if [[ -z $DRY_RUN ]] && (( ${kinds[(I)sysagent]} || ${kinds[(I)daemon]} )); then
+    for i in $pick; do [[ ${kinds[i]} == (sysagent|daemon) ]] && { sudo -p "  ${D}$T[sudo_prompt]${N} " -v || return 0; break }; done
+  fi
+  local done_labels=()
+  for i in $pick; do st_disable ${kinds[i]} "${labels[i]}" "${files[i]}"; ok "${labels[i]}"; done_labels+=( "${labels[i]}" ); done
+  log_hist m7 0 "${(j:, :)done_labels}"
+  print
+  celebrate "$(t st_done ${#pick})"
+}
+
+du_scan() {
+  local dir=$1 min=$2 size f h
+  find "$dir" -xdev \( -path "$HOME/Library" -o -path "$HOME/.Trash" -o -name "*.app" -o -name node_modules -o -name .git \) -prune -o -type f -size +${min}M -print0 2>/dev/null \
+    | xargs -0 stat -f $'%z\t%N' 2>/dev/null \
+    | awk -F'\t' '{ c[$1]++; l[NR] = $0; s[NR] = $1 } END { for (i = 1; i <= NR; i++) if (c[s[i]] > 1) print l[i] }' \
+    | while IFS=$'\t' read -r size f; do h=$(md5 -q "$f" 2>/dev/null) && print -r -- "$h	$size	$(stat -f %m "$f")	$f"; done \
+    | sort -t$'\t' -k1,1 -k3,3n \
+    | awk -F'\t' '{ c[$1]++; l[NR] = $0; h[NR] = $1 } END { for (i = 1; i <= NR; i++) if (c[h[i]] > 1) print l[i] }'
+}
+
+do_dupes() {
+  title "$T[m8]"
+  local dir min
+  ask dir "$T[du_dir]"
+  dir=${dir/#\~/$HOME}; dir=${dir:-$HOME}
+  [[ -d $dir ]] || { err "$(t du_bad "$dir")"; return 0 }
+  ask min "$T[lg_min] ${D}[1]${N}"
+  [[ $min == <1-> ]] || min=1
+  local -a rows=( ${(f)"$(spin "$T[du_spin]" du_scan "$dir" $min)"} )
+  rows=( ${rows:#} )
+  (( ${#rows} )) || { ok "$T[du_none]"; return 0 }
+  local -a gstart gend
+  local i prev= h
+  for i in {1..${#rows}}; do
+    h=${rows[i]%%$'\t'*}
+    if [[ $h != $prev ]]; then (( ${#gstart} )) && gend+=( $(( i - 1 )) ); gstart+=( $i ); prev=$h; fi
+  done
+  gend+=( ${#rows} )
+  local g j sz p
+  for g in {1..${#gstart}}; do
+    sz=${${rows[gstart[g]]#*$'\t'}%%$'\t'*}
+    print "  ${M}$(t du_group $g $(( gend[g] - gstart[g] + 1 )) "$(human $(( sz / 1024 )))")${N}"
+    for j in {${gstart[g]}..${gend[g]}}; do
+      p=${rows[j]#*$'\t'*$'\t'*$'\t'}
+      if (( j == gstart[g] )); then print "     ${G}$T[du_keep]${N}  ${p/#$HOME/~}"
+      else print "     ${R}✘${N}      ${p/#$HOME/~}"; fi
+    done
+  done
+  print
+  local sel k=0
+  ask sel "$T[du_pick]"
+  local -a pick
+  for g in $(pick_idx "$sel" ${#gstart}); do
+    for j in {$(( gstart[g] + 1 ))..${gend[g]}}; do
+      pick+=( "${rows[j]#*$'\t'*$'\t'*$'\t'}" )
+      (( k += ${${rows[j]#*$'\t'}%%$'\t'*} / 1024 ))
+    done
+  done
+  (( ${#pick} )) || return 0
+  confirm "$(t du_ask ${#pick} "$(human $k)")" || return 0
+  to_trash $pick
+  log_hist m8 $k
+  celebrate "$(t du_done "$(human $k)")"
+}
+
+do_history() {
+  title "$T[mh]"
+  [[ -s $HIST_FILE ]] || { warn "$T[hi_empty]"; return 0 }
+  local line d a k x
+  for line in ${(f)"$(tail -n 20 $HIST_FILE)"}; do
+    IFS=$'\t' read -r d a k x <<< "$line"
+    printf "  ${D}%s${N}  %-30s %9s  ${D}%s${N}\n" "$d" "$T[$a]" "$( (( k )) && human $k || print -n -)" "$x"
+  done
+  print "\n  ${B}$(t hi_total "$(human $(awk -F'\t' '{s+=$3} END{print s+0}' $HIST_FILE))")${N}"
 }
 
 menu_item() { printf "  ${D}│${N}  ${M}%s${N}  ${B}%s${N}  %-38s${D}│${N}\n" "$1" "$2" "$3" }
 
 menu() {
-  local first=1
+  local first=1 c=
   while true; do
     [[ -n $FANCY ]] && print -n "\e[H\e[2J"
     print
     draw_logo $(( first ? 10 : 1 )); first=0
     overview
+    [[ -n $DRY_RUN ]] && print "\n  ${Y}✦ $T[dry_badge]${N}"
     print "\n  ${D}╭──────────────────────────────────────────────╮${N}"
     menu_item ✦ 1 "$T[m1]"
     menu_item ✧ 2 "$T[m2]"
     menu_item ✦ 3 "$T[m3]"
     menu_item ✧ 4 "$T[m4]"
     menu_item ✦ 5 "$T[m5]"
+    menu_item ✧ 6 "$T[m6]"
+    menu_item ✦ 7 "$T[m7]"
+    menu_item ✧ 8 "$T[m8]"
+    menu_item ✦ 9 "$T[m9]"
+    menu_item ✧ h "$T[mh]"
     menu_item ⋆ q "$T[mq]"
     print "  ${D}╰──────────────────────────────────────────────╯${N}\n"
-    local c=
+    c=
     key c "  ${M}›${N} " || exit 0
     print "$c"
     case $c in
@@ -395,6 +774,11 @@ menu() {
       3) do_uninstall ;;
       4) do_large ;;
       5) do_caches ;;
+      6) do_downloads ;;
+      7) do_startup ;;
+      8) do_dupes ;;
+      9) do_auto ;;
+      h|H) do_history ;;
       q|Q) print "  ${Y}✦${N} ${D}$T[bye]${N}\n"; exit 0 ;;
       *) continue ;;
     esac
@@ -405,16 +789,23 @@ menu() {
 
 usage() {
   print "$(t usage $SCRIPT)\n"
-  printf "  %-14s %s\n" "ram" "$T[u_ram]" "trash" "$T[u_trash]" "uninstall" "$T[u_un]" "large" "$T[u_lg]" "caches" "$T[u_ca]"
-  print "  $T[u_menu]"
+  printf "  %-14s %s\n" ram "$T[u_ram]" trash "$T[u_trash]" uninstall "$T[u_un]" large "$T[u_lg]" caches "$T[u_ca]" \
+    downloads "$T[u_dl]" startup "$T[u_st]" duplicates "$T[u_du]" auto "$T[u_auto]" history "$T[u_hist]"
+  print "  $T[u_menu]\n"
+  print "  $T[u_dry]\n  $T[u_yes]"
 }
 
-case $1 in
+case $CMD in
   ram) do_ram ;;
   corbeille|trash) do_trash ;;
   desinstaller|uninstall) do_uninstall ;;
   gros|large) do_large ;;
   caches) do_caches ;;
+  telechargements|downloads) do_downloads ;;
+  demarrage|startup) do_startup ;;
+  doublons|duplicates) do_dupes ;;
+  auto) do_auto ;;
+  historique|history) do_history ;;
   ""|menu) menu ;;
   -v|--version) print "mac-cleaner $VERSION" ;;
   -h|--help) usage ;;

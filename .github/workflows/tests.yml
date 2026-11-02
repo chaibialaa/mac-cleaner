@@ -1,0 +1,12 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: zsh tests/run.zsh
