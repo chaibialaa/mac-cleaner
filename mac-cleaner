@@ -1,7 +1,7 @@
 #!/bin/zsh
 setopt null_glob extended_glob
 
-VERSION=1.0.2
+VERSION=1.0.3
 SCRIPT=${0:t}
 
 if [[ -t 1 && -z $NO_COLOR ]]; then
@@ -158,7 +158,7 @@ spin() {
   local pid=$! i=0 frames=(✶ ✷ ✸ ✹ ✺ ✹ ✸ ✷)
   print -n "\e[?25l" >&2
   while kill -0 $pid 2>/dev/null; do
-    printf "\r  ${Y}%s${N} ${D}%s${N}" $frames[$(( i++ % ${#frames} + 1 ))] "$msg" >&2
+    printf "\r  ${Y}%s${N} ${D}%s${N}" ${frames[i++ % ${#frames} + 1]} "$msg" >&2
     sleep 0.08
   done
   wait $pid
@@ -193,7 +193,7 @@ celebrate() {
   local -a cols=(228 221 215 213 177 141 117 228)
   print -n "\e[?25l"
   for f in {1..8}; do
-    printf "\r  \e[38;5;%dm★ ✦ ⋆${N}  ${B}%s${N}  \e[38;5;%dm⋆ ✦ ★${N}" $cols[f] "$msg" $cols[9 - f]
+    printf "\r  \e[38;5;%dm★ ✦ ⋆${N}  ${B}%s${N}  \e[38;5;%dm⋆ ✦ ★${N}" ${cols[f]} "$msg" ${cols[9-f]}
     sleep 0.06
   done
   print "\e[?25h"
