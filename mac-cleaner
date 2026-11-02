@@ -1,7 +1,7 @@
 #!/bin/zsh
 setopt null_glob extended_glob
 
-VERSION=1.0.1
+VERSION=1.0.2
 SCRIPT=${0:t}
 
 if [[ -t 1 && -z $NO_COLOR ]]; then
@@ -170,7 +170,13 @@ confirm() { local r; read "r?  ${M}?${N} $1 ${D}($T[yn])${N} ${M}›${N} "; [[ $
 
 ask() { local __v; read "__v?  ${M}?${N} $2 ${M}›${N} "; : ${(P)1::=$__v} }
 
-pause() { local r; read -s -k1 -u0 "r?  ${D}$T[back]${N}"; print }
+key() {
+  local __k
+  if [[ -t 0 ]]; then read -s -k1 "__k?$2"; else read -k1 -u0 "__k?$2"; fi || return 1
+  : ${(P)1::=$__k}
+}
+
+pause() { local r; key r "  ${D}$T[back]${N}"; print }
 
 title() {
   local t=" ✦ $1 " w=56
@@ -380,9 +386,9 @@ menu() {
     menu_item ✦ 5 "$T[m5]"
     menu_item ⋆ q "$T[mq]"
     print "  ${D}╰──────────────────────────────────────────────╯${N}\n"
-    local c
-    read -k1 -u0 "c?  ${M}›${N} " || exit 0
-    print
+    local c=
+    key c "  ${M}›${N} " || exit 0
+    print "$c"
     case $c in
       1) do_ram ;;
       2) do_trash ;;
